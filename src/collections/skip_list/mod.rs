@@ -25,27 +25,22 @@ where
     len: usize,
 }
 // ANCHOR_END: struct
-
 impl<K: Ord + Default, V: Default> SkipList<K, V> {
     fn random_height(&mut self) -> usize {
-        // 超几何分布打的表，参考leveldb
+        // geometric distribution table
         // f(n) = p^n(1-p), p=0.25
-        const RAND_TABLE: [u32; 12] = [
-            0u32,
-            0xBFFFFFFFu32,
-            0xEFFFFFFEu32,
-            0xFBFFFFFDu32,
-            0xFEFFFFFCu32,
-            0xFFBFFFFBu32,
-            0xFFEFFFFAu32,
-            0xFFFBFFF9u32,
-            0xFFFEFFF8u32,
-            0xFFFFBFF7u32,
-            0xFFFFEFF6u32,
-            0xFFFFFBF5u32,
-        ];
-        let mut level: usize = 0;
-        let rand_num = self.rng.gen::<u32>();
+        const RAND_TABLE: [u32; MAX_HEIGHT] = {
+            let mut res = [0; MAX_HEIGHT];
+            let mut factor = ((u32::MAX as u64) * 3 / 4) as u32;
+            let mut i = 1;
+            while i < MAX_HEIGHT {
+                res[i] = res[i - 1] + factor;
+                factor /= 4;
+                i += 1;
+            }
+            res
+        };
+        let (mut level, rand_num) = (0, self.rng.gen::<u32>());
         while level < RAND_TABLE.len() && rand_num > RAND_TABLE[level] {
             level += 1;
         }
@@ -113,7 +108,7 @@ impl<K: Ord + Default, V: Default> SkipList<K, V> {
     /// 2. if searched same key. replace and return.
     /// 3. else, create a new skip node and insert to proper location.
     pub fn insert(&mut self, key: K, value: V) {
-        let jump_height: usize = self.random_height();
+        let jump_height = self.random_height();
         let mut cached = [null_mut(); MAX_HEIGHT];
         let mut start_point = self.head;
         for level in (0..MAX_HEIGHT).rev() {
@@ -170,20 +165,17 @@ impl<K: Ord + Default, V: Default> SkipList<K, V> {
     pub fn into_iter(self) -> IntoIterator<K, V> {
         IntoIterator { list: self }
     }
-    /// Creates an anonymous iterator yields the key in specifi order.
-    pub fn keys(&self) -> Box<dyn Iterator<Item = &K> + '_> {
-        Box::new(self.iter().map(|(key, _)| key)) as Box<dyn Iterator<Item = &K>>
+    /// Creates an anonymous iterator yielding the key in specific order.
+    pub fn keys(&self) -> impl Iterator<Item = &K> {
+        self.iter().map(|(key, _)| key)
     }
-    /// Creates an anonymous iterator yields the values in specifi order.
-    pub fn values(&self) -> Box<dyn Iterator<Item = &V> + '_> {
-        Box::new(self.iter().map(|(_, value)| value)) as Box<dyn Iterator<Item = &V>>
+    /// Creates an anonymous iterator yielding the values in specific order.
+    pub fn values(&self) -> impl Iterator<Item = &V> {
+        self.iter().map(|(_, value)| value)
     }
-    /// Creates an anonymous iterator yields the values in range [key1, key2).
-    pub fn range(&self, key1: K, key2: K) -> Box<dyn Iterator<Item = (&K, &V)> + '_> {
-        Box::new(
-            self.iter()
-                .filter(move |(key, _)| (*key >= &key1) && (*key < &key2)),
-        )
+    /// Creates an anonymous iterator yielding the values within range [key1, key2).
+    pub fn range(&self, key1: K, key2: K) -> impl Iterator<Item = (&K, &V)> {
+        self.iter().filter(move |(key, _)| (*key >= &key1) && (*key < &key2))
     }
     /// Indiates whether the skiplist is empty.
     pub fn is_empty(&self) -> bool {
@@ -197,8 +189,8 @@ impl<K: Ord + Default, V: Default> SkipList<K, V> {
         }
     }
     /// Gets an mutable iterator over the list, sorted by key.
-    pub fn iter_mut(&mut self) -> MutIterator<K, V> {
-        MutIterator {
+    pub fn iter_mut(&mut self) -> IterMut<K, V> {
+        IterMut {
             ptr: unsafe { (*self.head).next_by_height[0] },
             _marker: Default::default(),
         }
@@ -232,7 +224,7 @@ where
     }
 }
 
-pub struct MutIterator<'a, K, V>
+pub struct IterMut<'a, K, V>
 where
     K: Default,
     V: Default,
@@ -258,7 +250,7 @@ where
     list: SkipList<K, V>,
 }
 
-impl<'a, K, V: 'a> Iterator for MutIterator<'a, K, V>
+impl<'a, K, V: 'a> Iterator for IterMut<'a, K, V>
 where
     K: Default,
     V: Default,
@@ -345,7 +337,7 @@ mod tests {
     #[test]
     fn insert() {
         let list = create_testee();
-        let res: Vec<(String, i32)> = list.into_iter().collect();
+        let res: Vec<_> = list.into_iter().collect();
         assert_eq!(
             vec![
                 ("a".to_owned(), 8),
@@ -400,7 +392,7 @@ mod tests {
         let list = create_testee();
         assert_eq!(
             vec![&"a".to_owned(), &"c".to_owned(), &"e".to_owned()],
-            list.keys().collect::<Vec<&String>>()
+            list.keys().collect::<Vec<_>>()
         );
         assert_eq!(vec![&8, &4, &5], list.values().collect::<Vec<&i32>>());
     }
