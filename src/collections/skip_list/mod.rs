@@ -1,8 +1,10 @@
 use std::fmt::{Debug, Display, Formatter};
 use std::marker;
-
-use rand::Rng;
+use std::mem;
+use std::mem::MaybeUninit;
 use std::ptr::null_mut;
+
+use rand::{thread_rng, Rng};
 
 /// The maximum height for skip node.
 const MAX_HEIGHT: usize = 12;
@@ -15,17 +17,14 @@ type SkipTrack<K, V> = [Option<*mut SkipNode<K, V>>; MAX_HEIGHT];
 /// [LevelDB](https://github.com/google/leveldb)
 ///
 // ANCHOR: struct
-pub struct SkipList<K, V>
-where
-    K: Default,
-    V: Default,
-{
+pub struct SkipList<K, V> {
     head: *mut SkipNode<K, V>,
     rng: rand::rngs::ThreadRng,
     len: usize,
 }
+
 // ANCHOR_END: struct
-impl<K: Ord + Default, V: Default> SkipList<K, V> {
+impl<K: Ord, V> SkipList<K, V> {
     fn random_height(&mut self) -> usize {
         // geometric distribution table
         // f(n) = p^n(1-p), p=0.25
@@ -49,8 +48,9 @@ impl<K: Ord + Default, V: Default> SkipList<K, V> {
     /// Creates an empty skip list.
     pub fn new() -> Self {
         SkipList {
+            // warn: construct a dummy head with entry unconcerned.
             head: Box::into_raw(Box::new(SkipNode {
-                entry: Default::default(),
+                entry: unsafe { MaybeUninit::<Entry<K, V>>::uninit().assume_init() },
                 next_by_height: [None; MAX_HEIGHT],
             })),
             rng: rand::thread_rng(),
@@ -135,20 +135,43 @@ impl<K: Ord + Default, V: Default> SkipList<K, V> {
         self.len += 1;
     }
     /// Removes the entry from the list.
-    // pub fn remove(&mut self, key: &K) -> Option<Entry<K, V>> {
-    //     let mut cached: Vec<*mut SkipNode<K, V>> = Vec::new();
-    //     let mut start_point = self.head;
-    //     for level in (0..MAX_HEIGHT).rev() {
-    //         unsafe {
-    //             while let Some(next_node) = (*start_point).next_by_height[level] {
-    //                 if (*next_node).entry.key == *key {
-
-    //                 }
-    //             }
-    //         }
-    //     }
-    //     None;
-    // }
+    pub fn remove(&mut self, key: &K) -> Option<Entry<K, V>> {
+        let mut cached: Vec<*mut SkipNode<K, V>> = Vec::new();
+        let mut start_point = self.head;
+        for level in (0..MAX_HEIGHT).rev() {
+            let mut is_found = false;
+            unsafe {
+                while let Some(next_node) = (*start_point).next_by_height[level] {
+                    let k = &(*next_node).entry.key;
+                    if k > key {
+                        break;
+                    } else if k == key {
+                        is_found = true;
+                        break;
+                    }
+                    start_point = next_node;
+                }
+            }
+            if is_found {
+                cached.push(start_point);
+            }
+        }
+        if cached.is_empty() {
+            None
+        } else {
+            self.len -= 1;
+            let to_remove_ptr = unsafe { (*cached[0]).next_by_height[0].unwrap() };
+            cached
+                .iter()
+                .enumerate()
+                .rev()
+                .for_each(|(i, &ptr)| unsafe {
+                    (*ptr).next_by_height[i] = (*to_remove_ptr).next_by_height[i];
+                    (*to_remove_ptr).next_by_height[i] = None;
+                });
+            Some(unsafe { Box::from_raw(to_remove_ptr) }.entry)
+        }
+    }
     /// Remove the first entry under key order.
     pub fn pop_first(&mut self) -> Option<Entry<K, V>> {
         let head_node = unsafe { &mut *self.head };
@@ -175,9 +198,10 @@ impl<K: Ord + Default, V: Default> SkipList<K, V> {
     }
     /// Creates an anonymous iterator yielding the values within range [key1, key2).
     pub fn range(&self, key1: K, key2: K) -> impl Iterator<Item = (&K, &V)> {
-        self.iter().filter(move |(key, _)| (*key >= &key1) && (*key < &key2))
+        self.iter()
+            .filter(move |(key, _)| (*key >= &key1) && (*key < &key2))
     }
-    /// Indiates whether the skiplist is empty.
+    /// Indicates whether the SkipList is empty.
     pub fn is_empty(&self) -> bool {
         self.len == 0
     }
@@ -185,34 +209,22 @@ impl<K: Ord + Default, V: Default> SkipList<K, V> {
     pub fn iter(&self) -> Iter<K, V> {
         Iter {
             ptr: unsafe { (*self.head).next_by_height[0] },
-            _marker: Default::default(),
+            _marker1: Default::default(),
+            _marker2: Default::default(),
         }
     }
     /// Gets an mutable iterator over the list, sorted by key.
     pub fn iter_mut(&mut self) -> IterMut<K, V> {
         IterMut {
             ptr: unsafe { (*self.head).next_by_height[0] },
-            _marker: Default::default(),
+            _marker1: Default::default(),
+            _marker2: Default::default(),
         }
     }
-}
-
-impl<K, V> Display for SkipList<K, V>
-where
-    K: Default,
-    V: Default,
-{
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        write!(f, "SkipList:\n {:?}", self.head)
-    }
-}
-
-impl<K, V> Drop for SkipList<K, V>
-where
-    K: Default,
-    V: Default,
-{
-    fn drop(&mut self) {
+    /// Clear self
+    pub fn clear(&mut self) {
+        self.len = 0;
+        self.rng = thread_rng();
         let mut ptr = self.head;
         unsafe {
             while let Some(next_ptr) = (*ptr).next_by_height[0].take() {
@@ -221,40 +233,56 @@ where
             }
             Box::from_raw(ptr)
         };
+
+        self.head = Box::into_raw(Box::new(SkipNode {
+            entry: unsafe { MaybeUninit::<Entry<K, V>>::uninit().assume_init() },
+            next_by_height: [None; MAX_HEIGHT],
+        }));
     }
 }
 
-pub struct IterMut<'a, K, V>
-where
-    K: Default,
-    V: Default,
-{
-    ptr: Option<*mut SkipNode<K, V>>,
-    _marker: marker::PhantomData<&'a K>,
+impl<K, V> Display for SkipList<K, V> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "SkipList:\n {:?}", self.head)
+    }
 }
 
-pub struct Iter<'a, K, V>
-where
-    K: Default,
-    V: Default,
-{
-    ptr: Option<*mut SkipNode<K, V>>,
-    _marker: marker::PhantomData<&'a K>,
+impl<K, V> Drop for SkipList<K, V> {
+    fn drop(&mut self) {
+        let mut ptr = self.head;
+        unsafe {
+            while let Some(next_ptr) = (*ptr).next_by_height[0].take() {
+                if ptr == self.head {
+                    // self.head is a dummy node, deconstruct it will cause memory error.
+                    mem::forget(ptr)
+                }
+                else {
+                    Box::from_raw(ptr);
+                }
+                ptr = next_ptr;
+            }
+            Box::from_raw(ptr);
+        };
+    }
 }
 
-pub struct IntoIterator<K, V>
-where
-    K: Default,
-    V: Default,
-{
+pub struct IterMut<'a, K, V> {
+    ptr: Option<*mut SkipNode<K, V>>,
+    _marker1: marker::PhantomData<&'a K>,
+    _marker2: marker::PhantomData<&'a V>,
+}
+
+pub struct Iter<'a, K, V> {
+    ptr: Option<*mut SkipNode<K, V>>,
+    _marker1: marker::PhantomData<&'a K>,
+    _marker2: marker::PhantomData<&'a V>,
+}
+
+pub struct IntoIterator<K, V> {
     list: SkipList<K, V>,
 }
 
-impl<'a, K, V: 'a> Iterator for IterMut<'a, K, V>
-where
-    K: Default,
-    V: Default,
-{
+impl<'a, K, V: 'a> Iterator for IterMut<'a, K, V> {
     type Item = (&'a mut K, &'a mut V);
     fn next(&mut self) -> Option<Self::Item> {
         self.ptr.map(|node| unsafe {
@@ -264,11 +292,7 @@ where
     }
 }
 
-impl<'a, K, V: 'a> Iterator for Iter<'a, K, V>
-where
-    K: Default,
-    V: Default,
-{
+impl<'a, K, V: 'a> Iterator for Iter<'a, K, V> {
     type Item = (&'a K, &'a V);
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -281,8 +305,7 @@ where
 
 impl<K, V> Iterator for IntoIterator<K, V>
 where
-    K: Ord + Default,
-    V: Default,
+    K: Ord,
 {
     type Item = (K, V);
     fn next(&mut self) -> Option<Self::Item> {
@@ -290,7 +313,6 @@ where
     }
 }
 
-#[derive(Default)]
 pub struct Entry<K, V> {
     key: K,
     value: V,
@@ -302,13 +324,11 @@ impl<K, V> Entry<K, V> {
     }
 }
 
-impl<K, V> Display for Entry<K, V>
-where
-    K: Ord + Default + Debug,
-    V: Default + Debug,
-{
+impl<K: Ord + Debug, V: Debug> Debug for SkipList<K, V> {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{:?}: {:?}", self.key, self.value)
+        f.debug_map()
+            .entries(self.iter().map(|(k, v)| (k, v)))
+            .finish()
     }
 }
 
@@ -319,11 +339,13 @@ struct SkipNode<K, V> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use rand::RngCore;
     use std::cmp::Ordering;
     use std::collections::BTreeMap;
     use std::time::Instant;
+
+    use rand::RngCore;
+
+    use super::*;
 
     fn create_testee() -> SkipList<String, i32> {
         let mut list = SkipList::new();
@@ -349,7 +371,13 @@ mod tests {
     }
 
     #[test]
-    fn insert_get() {
+    fn debug_print() {
+        let list = create_testee();
+        assert_eq!(format!("{:?}", list), "{\"a\": 8, \"c\": 4, \"e\": 5}");
+    }
+
+    #[test]
+    fn insertion_get() {
         let mut list = create_testee();
         assert_eq!(list.get(&"c".to_owned()), Some(&4));
         assert_eq!(list.get(&"e".to_owned()), Some(&5));
@@ -400,10 +428,68 @@ mod tests {
     #[test]
     fn test_get_mut() {
         let mut list = create_testee();
-        let mut ele = list.get_mut(&"a".to_owned()).unwrap();
+        let ele = list.get_mut(&"a".to_owned()).unwrap();
         *ele = 114514;
         assert_eq!(*list.get_mut(&"a".to_owned()).unwrap(), 114514);
     }
+
+    #[test]
+    fn test_insertion_remove() {
+        let mut list = create_testee();
+        assert_eq!(
+            list.keys().collect::<Vec<_>>(),
+            vec![&"a".to_owned(), &"c".to_owned(), &"e".to_owned()],
+        );
+        assert_eq!(list.remove(&"a".to_owned()).unwrap().value, 8i32);
+        assert!(list.remove(&"a".to_owned()).is_none());
+        assert_eq!(list.remove(&"c".to_owned()).unwrap().value, 4i32);
+        assert!(list.remove(&"c".to_owned()).is_none());
+    }
+
+    #[test]
+    fn test_whether_key_ordered() {
+        let mut list = SkipList::new();
+        let mut rng = rand::thread_rng();
+        (0..70000).for_each(|_| {
+            list.insert(rng.next_u64(), rng.next_u64());
+        });
+        assert!(list
+            .into_iter()
+            .collect::<Vec<_>>()
+            .windows(2)
+            .all(|w| w[0] < w[1]))
+    }
+
+    // the #[bench] is marked as soft_unstable and could not work, comment it out until stable solution.
+    // see issue #64266 <https://github.com/rust-lang/rust/issues/64266>
+
+    // #[bench]
+    // fn bench_get_inserts_by_skip_list(bencher: &mut Bencher) {
+    //     // prepare a BTreeMap and a SkipList with amount of data.
+    //     let mut skip_list = SkipList::new();
+    //     let mut rng = rand::thread_rng();
+    //     bencher.iter(|| {
+    //         (0..1000).for_each(|| {
+    //             let (key, value) = (rng.next_u64(), rng.next_u64());
+    //             skip_list.insert(key, value);
+    //         });
+    //         skip_list.clear();
+    //     });
+    // }
+    //
+    // #[bench]
+    // fn bench_get_inserts_by_btreemap(bencher: &mut Bencher) {
+    //     // prepare a BTreeMap and a SkipList with amount of data.
+    //     let mut btree_map = BTreeMap::new();
+    //     let mut rng = rand::thread_rng();
+    //     bencher.iter(|| {
+    //         (0..1000).for_each(|| {
+    //             let (key, value) = (rng.next_u64(), rng.next_u64());
+    //             btree_map.insert(key, value);
+    //         });
+    //         btree_map.clear();
+    //     });
+    // }
 
     #[test]
     fn great_many_inserts_gets() {
@@ -437,5 +523,25 @@ mod tests {
             skip_list_mean_cost,
             btree_map_mean_cost
         );
+    }
+
+    #[test]
+    fn test_double_free() {
+        static mut DROPS: u32 = 0;
+        struct S;
+        impl Drop for S {
+            fn drop(&mut self) {
+                unsafe {
+                    DROPS += 1;
+                }
+            }
+        }
+        let count = 10;
+        let mut d = SkipList::new();
+        (0..count).for_each(|k| d.insert(k, S));
+        core::mem::drop(d);
+        unsafe {
+            assert_eq!(DROPS, count);
+        }
     }
 }
